@@ -1,0 +1,54 @@
+// written by me, with the purpose of sending automated emails reminding people 
+// to return the tools they have checked out from our lab.
+
+function checkOverdue() {
+  const ss = SpreadsheetApp.openById("id"); // opens the Tool Sheet Responese spreadsheets
+  const activeCheckouts = ss.getSheetByName("Active");
+  //const activeCheckouts = ss.getSheetByName("Testing emails"); //for testing purposes
+  const oneDay = 24 * 60 * 60 * 1000;
+  const oneWeek = oneDay * 7;
+  const oneMonth = oneWeek * 4;
+  let currentTime = new Date().valueOf(); // in milliseconds
+  for (let i = 1; i <= activeCheckouts.getDataRange().getNumRows(); i++) {
+    const timeIndex = "A" + i;
+    const emailIndex = "B" + i;
+    const toolIndex = "D" + i;
+    const returnedIndex = "I" + i;
+    const returned = activeCheckouts.getRange(returnedIndex);
+    let time = activeCheckouts.getRange(timeIndex).getValue().valueOf();
+    const timeDif = currentTime - time;
+    if (!returned.isBlank()) {
+      continue;
+    }
+    else if (timeDif > oneMonth) {
+      sendEmail(activeCheckouts.getRange(emailIndex).getValue(), activeCheckouts.getRange(toolIndex).getValue(), 3);
+    }
+    else if (timeDif > oneWeek) {
+      sendEmail(activeCheckouts.getRange(emailIndex).getValue(), activeCheckouts.getRange(toolIndex).getValue(), 2);
+    }
+    else if (timeDif > oneDay) {
+      sendEmail(activeCheckouts.getRange(emailIndex).getValue(), activeCheckouts.getRange(toolIndex).getValue(), 1);
+    }
+    else {
+      continue;
+    }
+  }
+}
+
+function sendEmail(email, tools, level) {
+  let body = "";
+  switch (level) {
+    case 1:
+      body = "Hello,\n\nYou are receiving this email because our records show the " + tools + " you have checked out from the Visible Futures Lab is/are overdue. All tool checkouts are due 24 hours after checkout.\n\nPlease return the tool(s) you have checked out to a VFL staff member at your earliest convenience and during any of our open hours as listed on our website: vfl.sva.edu.\n\nIf you believe this email has been sent in error, please reply.\n\nThank you,\nVFL Staff";
+      break;
+    case 2:
+      body = "Hello,\n\nYou are receiving this email because our records show the " + tools + " you have checked out from the Visible Futures Lab is/are overdue by more than a week. All tool checkouts are due 24 hours after checkout.\n\nPlease return the tool(s) you have checked out to a VFL staff member at your earliest convenience and during any of our open hours as listed on our website: vfl.sva.edu.\n\nIf you believe this email has been sent in error, please reply.\n\nThank you,\nVFL Staff";
+      break;
+    case 3:
+      body = "Hello,\n\nYou are receiving this email because our records show the " + tools + " you have checked out from the Visible Futures Lab is/are overdue by more than a month.\n\nPlease return the tool(s) you have checked out to a VFL staff member at your earliest convenience and during any of our open hours as listed on our website: vfl.sva.edu.\n\nIf you believe this email has been sent in error, please reply.\n\nThank you,\nVFL Staff";
+      break;
+    default:
+      break;
+  }
+  MailApp.sendEmail(email, "VFL Tool Overdue", body);
+}
