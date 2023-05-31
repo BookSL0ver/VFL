@@ -1,0 +1,699 @@
+// I wrote the sections that handle the tests, which was our 
+// system of ensuring that people had taken and comprehended 
+// the trainings for certain machines, and the section on 
+// forwarding the appointment information and type to another 
+// spreadsheet, where I was consolidating a few areas of 
+// information we had so it would be more readable
+// lines: 77-144, 160-368, 402-417, 436-444, 492-678
+
+// This script runs every time this app's endpoint receives 
+// a http POST request. The requests come from koalendar.com,
+// the service the VFL uses to schedule appointments, every
+// time an appoinment is created, rescheduled, or canceled.
+// 
+// The script helps maintain the sheet so it accurately
+// reflects scheduling. This sheet is used as a db/table
+// for the VFL's check-in application. The student
+// must arrive within the time frame of the Start and 
+// End times.
+
+
+const SHEET_NAME = "Active";
+const EMAIL_COLUMN = 5;
+const TIME_DIFFERNECE = -4;
+const SYS_ADMIN_EMAIL = "me@email.com"
+
+// -----> handle http post <-----
+
+function doPost(e) {
+  
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
+  var data = JSON.parse(e.postData.contents);
+
+  switch (data.type) {
+
+    case "event.created":
+
+      created(sheet, data);
+      break;
+
+    case "event.rescheduled":
+
+      rescheduled(sheet, data);
+      break;
+
+    case "event.canceled":
+
+      canceled(sheet, data);
+      break;
+
+    default:
+
+      let msg = `unknown event type: <b>${data.type}<b><br><br>data:<br><br>${JSON.stringify(data)}`;
+      handleError(msg);
+      break;
+
+  }
+}
+
+// -----> calendar helpers <-----
+
+function created(sheet, data) {
+
+  let toAppend = [
+    data.invitee.name,
+    data.invitee.email,
+    convertTimeStamp(data.start_at),
+    convertTimeStamp(data.end_at),
+    data.id,
+    data.invitee.fields["iwM2R"],
+    data.invitee.fields["QDKy5"],
+    data.invitee.fields["bZYNb"],
+    data.invitee.fields["H5oK4"],
+    data.invitee.fields["WYREH"],
+    data.invitee.fields["XNY9-"],
+    data.invitee.fields["DNJ5f"]
+  ];
+
+  try {
+    let start = new Date(data.start_at);
+    let end = new Date(data.end_at);
+    let woodshopCheck = checkWoodshop(start, end, data.invitee.email);
+    let laserCheck = checkLasers(start, end, data.invitee.email);
+    let printCheck = check3D(start, end, data.invitee.email);
+    if (woodshopCheck != null) {
+      if (!woodshopCheck) {
+        notAllowed("Woodshop", data.invitee.email);
+        toAppend.push("Not Allowed");
+      }
+      else {
+        toAppend.push("Allowed");
+      }
+    }
+    else if (laserCheck != null) {
+      if (!laserCheck) {
+        notAllowed("Laser Cutter", data.invitee.email);
+        toAppend.push("Not Allowed");
+      }
+      else {
+        toAppend.push("Allowed");
+      }
+    }
+    else if (printCheck != null) {
+      if (!printCheck) {
+        notAllowed("3D Printing", data.invitee.email);
+        toAppend.push("Not Allowed");
+      }
+      else {
+        toAppend.push("Allowed");
+      }
+    }
+    
+    /*
+    let start = new Date(data.start_at);
+    let end = new Date(data.end_at);
+    let testCheck = checkTest(start, end, data.invitee.email);
+    MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "testCheck = " + testCheck);
+    if (testCheck != null) {
+      MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "Hit Not Null");
+      if (!testCheck) {
+        MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "Hit Not Allowed");
+        notAllowed("Test", data.invitee.email);
+        toAppend.push("Not Allowed");
+      }
+      toAppend.push("Allowed");
+    }
+    */
+  }
+
+  catch (e) {
+    MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "error = " + e);
+  }
+
+  // toAppend[5] should be the appointment booker type answer, ie program name, alumni, staff, etc.
+  try {
+    //MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "department = " + toAppend[5]);
+    if (toAppend[5] === "Alumni (Lab fee & Approval required)") {
+      MailApp.sendEmail("supervisor@email.com", "Alumni Appointment", "An alumni named " + toAppend[0] + " has made an appointment at the VFL at " + new Date(toAppend[2]) + ".");
+      //MailApp.sendEmail(SYS_ADMIN_EMAIL, "Alumni Appointment", "An alumni named " + toAppend[0] + " has made an appointment at the VFL at " + new Date(toAppend[2]) + ".");
+    }
+  }
+
+  catch (e) {
+    MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "error = " + e);
+  }
+  
+  //MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "before append row");
+  try {
+
+    sheet.appendRow(toAppend);
+
+  } 
+  
+  catch (error) {
+
+    let msg = `error adding event:<br><br><b>${error}<b><br><br>data:<br><br>${JSON.stringify(data)}`;
+    handleError(msg);
+
+  }
+
+  try {
+    //MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "starting the new section");
+    // send appointment name, email, start, end, type, allowed to vfl access
+    const accessSheet = SpreadsheetApp.openById("id").getSheetByName("Appointments");
+    let accessAppend = [toAppend[0], toAppend[1], toAppend[2], toAppend[3], toAppend[4]];
+    // need to figure out which kind of training it is. can look on the calendars, might take a bit though when i get to the actuall appointments
+    const woodshop = CalendarApp.getCalendarsByName("_Woodshop_General_Access")[0];
+    const makerspace = CalendarApp.getCalendarsByName("_Makerspace_General_Access")[0];
+    const threeD = CalendarApp.getCalendarsByName("_3D_Printing")[0];
+    const cnc = CalendarApp.getCalendarsByName("_CNC_Router")[0];
+    const dtg = CalendarApp.getCalendarsByName("_Direct_to_Garment")[0];
+    const embroidery = CalendarApp.getCalendarsByName("_Embroidery_Machine")[0];
+    const fusionLaser = CalendarApp.getCalendarsByName("_Fusion_Laser")[0];
+    const helixLaser = CalendarApp.getCalendarsByName("_Helix_Laser")[0];
+    const sprayBooth = CalendarApp.getCalendarsByName("_Spray_Booth")[0];
+    const uvPrint = CalendarApp.getCalendarsByName("_UV_Printer")[0];
+    const vinylPrint = CalendarApp.getCalendarsByName("_Vinyl_Printer_Cutter")[0];
+    //let start = new Date(toAppend[2]);
+    //let end = new Date(toAppend[3]);
+    let start = new Date(data.start_at);
+    let end = new Date(data.end_at);
+    //MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "start: " + start.toDateString() + " end: " + end.toDateString());
+    let woodshopEvents = woodshop.getEvents(start, end);
+    let makerspaceEvents = makerspace.getEvents(start, end);
+    let threeDEvents = threeD.getEvents(start, end);
+    let cncEvents = cnc.getEvents(start, end);
+    let dtgEvents = dtg.getEvents(start, end);
+    let embrEvents = embroidery.getEvents(start, end);
+    let fusionEvents = fusionLaser.getEvents(start, end);
+    let helixEvents = helixLaser.getEvents(start, end);
+    let sbEvents = sprayBooth.getEvents(start, end);
+    let uvEvents = uvPrint.getEvents(start, end);
+    let vinylEvents = vinylPrint.getEvents(start, end);
+    let appointmentType = "";
+    for (let i = 0; i < woodshopEvents.length; i++) {
+      let desc = woodshopEvents[i].getDescription();
+      desc = desc.split("\n");
+      desc = desc[4];
+      desc = desc.substring(desc.indexOf("(") + 1, desc.indexOf(")"));
+      const email = desc;
+      if (email === toAppend[1]) {
+        appointmentType = "Woodshop General Access";
+        break;
+      }
+    }
+    if (appointmentType === "") {
+      for (let a = 0; a < makerspaceEvents.length; a++) {
+        let desc = makerspaceEvents[a].getDescription();
+        desc = desc.split("\n");
+        desc = desc[4];
+        desc = desc.substring(desc.indexOf("(") + 1, desc.indexOf(")"));
+        const email = desc;
+        if (email === toAppend[1]) {
+          appointmentType = "Makerspace General Access";
+          break;
+        }
+      }
+    }
+    if (appointmentType === "") {
+      for (let b = 0; b < threeDEvents.length; b++) {
+        let desc = threeDEvents[b].getDescription();
+        desc = desc.split("\n");
+        desc = desc[4];
+        desc = desc.substring(desc.indexOf("(") + 1, desc.indexOf(")"));
+        const email = desc;
+        if (email === toAppend[1]) {
+          appointmentType = "3D Printing";
+          break;
+        }
+      }
+    }
+    if (appointmentType === "") {
+      for (let c = 0; c < cncEvents.length; c++) {
+        let desc = cncEvents[c].getDescription();
+        desc = desc.split("\n");
+        desc = desc[4];
+        desc = desc.substring(desc.indexOf("(") + 1, desc.indexOf(")"));
+        const email = desc;
+        if (email === toAppend[1]) {
+          appointmentType = "CNC";
+          break;
+        }
+      }
+    }
+    if (appointmentType === "") {
+      for (let d = 0; d < dtgEvents.length; d++) {
+        let desc = dtgEvents[d].getDescription();
+        desc = desc.split("\n");
+        desc = desc[4];
+        desc = desc.substring(desc.indexOf("(") + 1, desc.indexOf(")"));
+        const email = desc;
+        if (email === toAppend[1]) {
+          appointmentType = "Direct to Garment Printing";
+          break;
+        }
+      }
+    }
+    if (appointmentType === "") {
+      for (let f = 0; f < embrEvents.length; f++) {
+        let desc = embrEvents[f].getDescription();
+        desc = desc.split("\n");
+        desc = desc[4];
+        desc = desc.substring(desc.indexOf("(") + 1, desc.indexOf(")"));
+        const email = desc;
+        if (email === toAppend[1]) {
+          appointmentType = "Embroidery Machine";
+          break;
+        }
+      }
+    }
+    if (appointmentType === "") {
+      //MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "Before fusion loop");
+      for (let g = 0; g < fusionEvents.length; g++) {
+        //MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "In the fusion loop");
+        let desc = fusionEvents[g].getDescription();
+        desc = desc.split("\n");
+        desc = desc[4];
+        desc = desc.substring(desc.indexOf("(") + 1, desc.indexOf(")"));
+        const email = desc;
+        if (email === toAppend[1]) {
+          //MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "fusion");
+          appointmentType = "Fusion Laser Cutter";
+          break;
+        }
+      }
+    }
+    if (appointmentType === "") {
+      for (let h = 0; h < helixEvents.length; h++) {
+        let desc = helixEvents[h].getDescription();
+        desc = desc.split("\n");
+        desc = desc[4];
+        desc = desc.substring(desc.indexOf("(") + 1, desc.indexOf(")"));
+        const email = desc;
+        if (email === toAppend[1]) {
+          appointmentType = "Helix Laser Cutter";
+          break;
+        }
+      }
+    }
+    if (appointmentType === "") {
+      for (let j = 0; j < sbEvents.length; j++) {
+        let desc = sbEvents[j].getDescription();
+        desc = desc.split("\n");
+        desc = desc[4];
+        desc = desc.substring(desc.indexOf("(") + 1, desc.indexOf(")"));
+        const email = desc;
+        if (email === toAppend[1]) {
+          appointmentType = "Spray Booth";
+          break;
+        }
+      }
+    }
+    if (appointmentType === "") {
+      for (let k = 0; k < uvEvents.length; k++) {
+        let desc = uvEvents[k].getDescription();
+        desc = desc.split("\n");
+        desc = desc[4];
+        desc = desc.substring(desc.indexOf("(") + 1, desc.indexOf(")"));
+        const email = desc;
+        if (email === toAppend[1]) {
+          appointmentType = "UV Printing";
+          break;
+        }
+      }
+    }
+    if (appointmentType === "") {
+      for (let l = 0; l < vinylEvents.length; l++) {
+        let desc = vinylEvents[l].getDescription();
+        desc = desc.split("\n");
+        desc = desc[4];
+        desc = desc.substring(desc.indexOf("(") + 1, desc.indexOf(")"));
+        const email = desc;
+        if (email === toAppend[1]) {
+          appointmentType = "Vinyl Printing/Cutting";
+          break;
+        }
+      }
+    }
+    accessAppend.push(appointmentType);
+    if (toAppend[12]) {
+      //MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "quiz type appointment");
+      accessAppend.push(toAppend[12]);
+    }
+    else {
+      //MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "not quiz type");
+      accessAppend.push("Allowed");
+    }
+    //MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "should append");
+    accessSheet.appendRow(accessAppend);
+  }
+
+  catch(e) {
+    MailApp.sendEmail(SYS_ADMIN_EMAIL, "Access Appointments Sheet Error", e);
+  }
+
+  /*
+  let cncCheck = checkCNC(convertTimeStamp(data.start_at), convertTimeStamp(data.end_at), data.invitee.email);
+  let woodshop2Check = checkWoodshop2(convertTimeStamp(data.start_at), convertTimeStamp(data.end_at), data.invitee.email);
+  else if (cncCheck != null) {
+    if (!cncCheck) {
+      notAllowed("CNC", data.invitee.email);
+    }
+  }
+  else if (woodshop2Check != null) {
+    if (!woodshop2Check) {
+      notAllowed("Woodshop 2", data.invitee.email);
+    }
+  }
+  */
+}
+
+function rescheduled(sheet, data) {
+
+  let toUpdate = [
+    data.invitee.name,
+    data.invitee.email,
+    convertTimeStamp(data.start_at),
+    convertTimeStamp(data.end_at),
+    data.id,
+    data.invitee.fields["iwM2R"],
+    data.invitee.fields["QDKy5"],
+    data.invitee.fields["bZYNb"],
+    data.invitee.fields["H5oK4"],
+    data.invitee.fields["WYREH"],
+    data.invitee.fields["XNY9-"],
+    data.invitee.fields["DNJ5f"]
+  ];
+
+  try {
+
+    idx = search(sheet, data.id);
+    sheet.getRange(idx, 1, 1, 12).setValues([toUpdate]);
+
+  }
+
+  catch (error) {
+
+    let msg = `error rescheduling event:<br><br><b>${error}<b><br><br>data:<br><br>${JSON.stringify(data)}`;
+    handleError(msg);
+
+  }
+
+  try {
+    //edit on vfl access sheet
+    const accessSheet = SpreadsheetApp.openById("id").getSheetByName("Appointments");
+    let toUpdateAccess = [
+      toUpdate[0],
+      toUpdate[1],
+      toUpdate[2],
+      toUpdate[3],
+      toUpdate[4]
+    ];
+    idx = search(accessSheet, data.id);
+    accessSheet.getRange(idx, 1, 1, 5).setValues([toUpdateAccess]);
+  }
+  catch(e) {
+    MailApp.sendEmail(SYS_ADMIN_EMAIL, "Access Appointments Sheet Error", e);
+  }
+}
+
+function canceled(sheet, data) {
+
+  try {
+
+    idx = search(sheet, data.id)
+    sheet.deleteRow(idx);
+
+  }
+
+  catch (error) {
+
+    let msg = `error canceling event:<br><br><b>${error}<b><br><br>data:<br><br>${JSON.stringify(data)}`;
+    handleError(msg);
+
+  }
+
+  try {
+    //remove from vfl access sheet
+    const accessSheet = SpreadsheetApp.openById("id").getSheetByName("Appointments");
+    idx = search(accessSheet, data.id);
+    accessSheet.deleteRow(idx);
+  }
+  catch(e) {
+    MailApp.sendEmail(SYS_ADMIN_EMAIL, "Access Appointments Sheet Error", e);
+  }
+}
+
+function search(sheet, id) {
+
+  let idRow;
+  var ids = sheet.getRange(2, EMAIL_COLUMN, sheet.getLastRow()).getValues();
+
+  ids.forEach((idArr, idx) => {
+
+    if (idArr[0] == id) {
+      // idx starts at 1 and
+      // first row is header
+      idRow = idx + 2;
+      return;
+
+    }
+  });
+
+  return idRow;
+}
+
+// -----> convert date <-----
+
+function convertTimeStamp(date) {
+
+  var dt = new Date(date);
+  dt.setHours(dt.getHours() + TIME_DIFFERNECE)
+
+  return dt.toISOString().replace(/.\d+Z$/g, "Z");
+
+}
+
+// -----> error <-----
+
+function handleError(msg) {
+
+  let email = {
+    to: "workplace@email.com",
+    cc: SYS_ADMIN_EMAIL,
+    subject: "|-----> CALENDAR SHEET ISSUE <-----|",
+    htmlBody: "AHHH... <br><br>" + msg
+  }
+
+  MailApp.sendEmail(email);
+  
+}
+
+function checkWoodshop(start, end, givenEmail) {
+  let woodshopCalendar =  CalendarApp.getCalendarsByName("_Woodshop_General_Access")[0];
+  let events = woodshopCalendar.getEvents(start, end);
+  for (let i = 0; i < events.length; i++) {
+    let desc = events[i].getDescription();
+    desc = desc.split("\n");
+    desc = desc[4];
+    desc = desc.substring(desc.indexOf("(") + 1, desc.indexOf(")"));
+    const email = desc;
+    //MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "wood email: " + email + " givenemail: " + givenEmail);
+    if (email === givenEmail) {
+      const aptType = "Woodshop";
+      let allowed = checkQuiz(aptType, email);
+      if (!allowed) {
+        return false;
+      }
+      return true;
+    }
+  }
+  return null;
+}
+
+function checkLasers(start, end, givenEmail) {
+  let helixLaserCutterCalendar = CalendarApp.getCalendarsByName("_Helix_Laser")[0];
+  let fusionLaserCutterCalendar = CalendarApp.getCalendarsByName("_Fusion_Laser")[0];
+  let eventsHelix = helixLaserCutterCalendar.getEvents(start, end);
+  let eventsFusion = fusionLaserCutterCalendar.getEvents(start, end);
+  
+  for (let i = 0; i < eventsHelix.length; i++) {
+    let desc = eventsHelix[i].getDescription();
+    desc = desc.split("\n");
+    desc = desc[4];
+    desc = desc.substring(desc.indexOf("(") + 1, desc.indexOf(")"));
+    const email = desc;
+    //MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "helix email: " + email + " givenemail: " + givenEmail);
+    if (email === givenEmail) {
+      const aptType = "Laser Cutter";
+      let allowed = checkQuiz(aptType, email);
+      if (!allowed) {
+        return false;
+      }
+      return true;
+    }
+  }
+  for (let j = 0; j < eventsFusion.length; j++) {
+    let desc = eventsFusion[j].getDescription();
+    desc = desc.split("\n");
+    desc = desc[4];
+    desc = desc.substring(desc.indexOf("(") + 1, desc.indexOf(")"));
+    const email = desc;
+    //MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "fusion email: " + email + " givenemail: " + givenEmail);
+    if (email === givenEmail) {
+      const aptType = "Laser Cutter";
+      let allowed = checkQuiz(aptType, email);
+      if (!allowed) {
+        return false;
+      }
+      return true;
+    }
+  }
+  return null;
+}
+
+function check3D(start, end, givenEmail) {
+  let printingCalendar =  CalendarApp.getCalendarsByName("_3D_Printing")[0];
+  let events = printingCalendar.getEvents(start, end);
+  for (let i = 0; i < events.length; i++) {
+    let desc = events[i].getDescription();
+    desc = desc.split("\n");
+    desc = desc[4];
+    desc = desc.substring(desc.indexOf("(") + 1, desc.indexOf(")"));
+    const email = desc;
+    //MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "3D email: " + email + " givenemail: " + givenEmail);
+    if (email === givenEmail) {
+      const aptType = "3D Printing";
+      let allowed = checkQuiz(aptType, email);
+      if (!allowed) {
+        return false;
+      }
+      return true;
+    }
+  }
+  return null;
+}
+
+function checkTest(start, end, givenEmail) {
+  //MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "In checkTest");
+  let testCalendar =  CalendarApp.getCalendarsByName("_Fusion_Laser")[0];
+  let event = testCalendar.getEvents(start, end);
+  //MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "event null? = " + (event === null));
+  for (let i = 0; i < event.length; i++) {
+    let desc = event[i].getDescription();
+    desc = desc.split("\n");
+    desc = desc[4];
+    desc = desc.substring(desc.indexOf("(") + 1, desc.indexOf(")"));
+    const email = desc;
+    MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "test email: " + email + " givenEmail: " + givenEmail);
+    if (email === givenEmail) {
+      const aptType = "Test";
+      let allowed = checkQuiz(aptType, email);
+      if (!allowed) {
+        return false;
+      }
+      return true;
+    }
+  }
+  return null;
+}
+
+
+//for if we start tracking training on these too
+function checkCNC(id) {
+
+}
+
+function checkWoodshop2(id) {
+
+}
+
+//helper functions for checking quizes
+function notAllowed(appointmentType, email) {
+  let subject = "VFL " + appointmentType + " appointment not allowed";
+  let training = "";
+  switch (appointmentType) {
+    case "Woodshop" :
+      training = "going to the VFL website and making a [Training] Woodshop appointment.";
+      break;
+    case "Laser Cutter" :
+      training = "going to the VFL website and making a [Training] Digital Fabrication appointment.";
+      break;
+    case "3D Printing" :
+      training = "going to the VFL website and making a [Training] Digital Fabrication appointment.";
+      break;
+    case "Test" :
+      training = "do nothing, this is a test.";
+      break;
+    default:
+      break;
+  }
+  let body = "Hello,\n\nApologies, but it appears you have not taken the proper training to be able to schedule your " + appointmentType + " appointment. You can schedule the required training by " + training + "\n\nPlease go to your booking confirmation email and click the button at the bottom of the email to cancel the appointment if you are unable to complete the training at least a day prior to your appointment.\n\nIf you believe this email has been sent in error, please contact us at vfl.digifab@sva.edu.\n\nThank you,\nVFL Staff";
+  MailApp.sendEmail(email, subject, body, {
+    name: "Training Needed",
+    noReply: true
+  });
+}
+
+function checkQuiz(type, email) {
+  let sheetID = "";
+  switch(type) {
+    case "Woodshop":
+      sheetID = "id";
+      break;
+    case "Laser Cutter":
+      sheetID = "id";
+      break;
+    case "3D Printing":
+      sheetID = "id";
+      break;
+    case "Test":
+      sheetID = "id";
+      break;
+    default:
+      //error
+      break;
+  }
+  const ss = SpreadsheetApp.openById(sheetID);
+  const sheet = ss.getSheetByName("Active");
+  let length = sheet.getDataRange().getNumRows();
+  let scores = [];
+  for ( let i = 1; i <= length; i++ ) {
+    let id = "B" + i;
+    if ( sheet.getRange(id).getValue() === email) {
+      let cell = "C" + ( i );
+      cell = sheet.getRange(cell).getValue();
+      cell = cell.split("/");
+      //MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "cell: " + cell);
+      //MailApp.sendEmail(SYS_ADMIN_EMAIL, "debug", "num1: " + cell[0] + " num2: " + cell[1] + " divide: " + ((cell[0]/cell[1]) * 100) + " greater? " + (((cell[0]/cell[1]) * 100) >= 80));
+      scores.push((cell[0]/cell[1]) * 100);
+    }
+  }
+  for (let j = 0; j < scores.length; j++) {
+    if (scores[j] >= 80) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function updateTime() {
+  const ss = SpreadsheetApp.openById("id");
+  const sheet = ss.getSheetByName("Today");
+  let today = new Date();
+  //Logger.log("today: " + today);
+  let day = today.getDate();
+  //Logger.log("day: " + day);
+  let month = today.getMonth() + 1;
+  //Logger.log("month: " + month);
+  if (day < 10) {
+    day = "0" + day;
+  }
+  if (month < 10) {
+    month = "0" + month;
+  }
+  today = today.getFullYear() + "-" + month + "-" + day;
+  //Logger.log("date: " + today);
+  today = "^" + today + ".*";
+  sheet.getRange("A1").setValue(today);
+}
